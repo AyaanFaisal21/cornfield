@@ -1,0 +1,5 @@
+.gen/
+__pycache__/
+*.pyd
+*.lib
+*.exp
