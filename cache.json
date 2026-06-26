@@ -1,0 +1,13 @@
+{
+  "sgemm|1024x1024x1024|NVIDIA GeForce RTX 2060 SUPER|3920d653": {
+    "config": {
+      "BK": 8,
+      "BM": 128,
+      "BN": 128,
+      "TM": 4,
+      "TN": 4
+    },
+    "label": "BM128_BN128_BK8_TM4_TN4",
+    "time_ms": 0.8357000042451546
+  }
+}

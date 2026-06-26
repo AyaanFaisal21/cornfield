@@ -11,7 +11,9 @@ Search strategies:
   - random_search() : sample a budget of configs from a large space (scales).
 """
 
+import hashlib
 import itertools
+import json
 import random
 import statistics
 import time
@@ -21,7 +23,8 @@ import torch
 from torch.utils.cpp_extension import load
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GEN = Path(__file__).parent / ".gen"   # generated .cu variants land here
+GEN = Path(__file__).parent / ".gen"        # generated .cu variants land here
+CACHE = Path(__file__).parent / "cache.json"  # tuned configs, keyed by op|shape|gpu|template
 
 
 def benchmark(fn, warmup=10, iters=50):
@@ -86,14 +89,48 @@ def random_search(name, template, space, inputs, ref, budget, seed=0,
     GEN.mkdir(exist_ok=True)
     picks = random.Random(seed).sample(space, min(budget, len(space)))
     print(f"  random search: {len(picks)} of {len(space)} configs (seed={seed})")
-    best = None
+    best = None  # (cfg, label, seconds)
     for i, cfg in enumerate(picks, 1):
         label, t, ok = _eval_config(name, template, cfg, inputs, ref, run, rtol, atol)
-        if ok and (best is None or t < best[1]):
-            best = (label, t, ok)
-        bs = f"{best[1]*1e3:7.3f}" if best else "    inf"
+        if ok and (best is None or t < best[2]):
+            best = (cfg, label, t)
+        bs = f"{best[2]*1e3:7.3f}" if best else "    inf"
         print(f"  [{i:2d}/{len(picks)}] {label:24s} {t*1e3:8.3f} ms   best-so-far {bs} ms")
     if best:
-        print(f"\n  best: {best[0]}  ({best[1]*1e3:.3f} ms)  "
+        print(f"\n  best: {best[1]}  ({best[2]*1e3:.3f} ms)  "
               f"-- {len(picks)} trials over a {len(space)}-config space")
-    return best
+    return best  # (cfg dict, label, seconds)
+
+
+# ---- config cache: tune once per (op, shape, gpu, template), then look it up ----
+
+def _gpu():
+    return torch.cuda.get_device_name(0) if DEVICE == "cuda" else "cpu"
+
+
+def cache_key(name, shape, template):
+    """Key on op + shape + GPU + a template hash. The template hash auto-invalidates
+    the cache when you change the kernel, so you never get a stale config."""
+    th = hashlib.md5(template.encode()).hexdigest()[:8]
+    return f"{name}|{'x'.join(map(str, shape))}|{_gpu()}|{th}"
+
+
+def autotune_cached(name, template, space, inputs, ref, shape, budget=8,
+                    force=False, seed=0, run="run", rtol=1e-3, atol=1e-2):
+    """Look up the best config for (op, shape, gpu, template); search + store on a miss."""
+    cache = json.loads(CACHE.read_text()) if CACHE.exists() else {}
+    key = cache_key(name, shape, template)
+
+    if not force and key in cache:
+        e = cache[key]
+        print(f"  cache HIT  [{key}]\n    -> {e['config']}  ({e['time_ms']:.3f} ms, no search)")
+        return e["config"]
+
+    print(f"  cache MISS [{key}] -- searching")
+    best = random_search(name, template, space, inputs, ref, budget,
+                         seed=seed, run=run, rtol=rtol, atol=atol)
+    cfg, label, secs = best
+    cache[key] = {"config": cfg, "label": label, "time_ms": secs * 1e3}
+    CACHE.write_text(json.dumps(cache, indent=2, sort_keys=True))
+    print(f"  cached best for [{key}]")
+    return cfg
