@@ -1,36 +1,58 @@
 # KernelTuner
 
-A tiny autotuning CUDA kernel optimizer.
+An autotuning CUDA kernel optimizer.
 
 **Premise:** the fastest GPU kernel depends on the *shape* and the *hardware*, and you
 can't reliably predict it — so don't guess. Generate kernel variants, compile them,
-check correctness, benchmark them on the real device, and keep the winner. (The same
-reason cuBLAS / cuDNN / Triton autotune.) This is the lesson from the
-[TransformerOp](../TransformerOp) project — where a "smarter" attention kernel kept
-losing to a simpler one — turned into a reusable tool.
+check correctness, **benchmark them on the real device**, and keep the winner. (The same
+reason cuBLAS / cuDNN / Triton autotune.) It's purely *empirical*: the tuner doesn't model
+why a config is fast — it measures wall-clock time, which captures every hardware facet at
+once, and picks the fastest. Spun out of the [TransformerOp](../TransformerOp) project.
 
-## How it works
+## What it does
 
-1. A kernel **template** with `__KEY__` placeholders (e.g. `__TILE__`).
-2. A list of **configs** to sweep (e.g. `TILE ∈ {8, 16, 32}`).
-3. `autotune()` substitutes each config, compiles it as a PyTorch CUDA extension,
-   gates on `torch.allclose` vs a reference, benchmarks with warmup + `cuda.synchronize`
-   + median, and returns the configs fastest-first.
+`tuner.py` is op-agnostic: give it a kernel **template** (with `__KEY__` placeholders) and
+a **config space**, and it generates, compiles, correctness-gates (`torch.allclose`),
+benchmarks (warmup + `cuda.synchronize` + median), and selects.
 
-The winner is reported *per shape* — run a few shapes and watch the best config change.
+- **`autotune()`** — grid search (small spaces).
+- **`random_search()`** — sample a budget from a large space (`make_space` builds + prunes it).
+- **`autotune_cached()`** — tune once per `(op, shape, gpu, template-hash)`, then look up
+  instantly (~70,000× faster on a hit). Cache key includes a template hash, so editing a
+  kernel auto-invalidates stale configs.
+
+## Ops covered (one engine, four performance categories)
+
+| op | category | key knobs | best vs torch |
+|---|---|---|---|
+| matmul (SGEMM) | compute-bound | `BM BN BK TM TN` (tiling, register-blocking) | ~1.5× off cuBLAS |
+| softmax | reduction | `TPR RPB` (threads/row, rows/block) | beat on short rows; ~1.1× on wide |
+| gelu | elementwise (memory-bound) | `VEC BLOCK` (vectorization width) | ~matched |
+| layernorm | fused (reduction + affine) | `TPR RPB` | beat on wide rows; ~matched on short |
+
+In every op the optimal config is **shape-dependent and discovered by measurement**: the
+matmul tile flips with matrix shape; for the reduction ops (softmax, layernorm) the winner
+flips between warp-per-row (`TPR=32`, short rows) and block-per-row (`TPR=256`, long rows);
+for gelu the best vector width wasn't the widest. Same engine, totally different knob sets —
+it's a *kernel* tuner, not a matmul tuner.
 
 ## Run
 
 ```powershell
 # reuses TransformerOp's venv; winbuild.bat sets up the MSVC build env
-cmd /c "winbuild.bat -m autotune_matmul"
+& ".\winbuild.bat" -m autotune_sgemm          # register-tiled matmul
+& ".\winbuild.bat" -m autotune_sgemm_search   # random search over the config space
+& ".\winbuild.bat" -m autotune_cached_demo    # config cache: tune once, look up
+& ".\winbuild.bat" -m autotune_softmax        # reduction op
+& ".\winbuild.bat" -m autotune_gelu           # elementwise op
+& ".\winbuild.bat" -m autotune_layernorm      # fused op
 ```
 
-Requires the same toolchain as TransformerOp Phase 3 (CUDA Toolkit 12.x + MSVC).
+Requires CUDA Toolkit 12.x + MSVC (same toolchain as TransformerOp Phase 3).
 
 ## Scope
 
-- **v1 (here):** parameter search over a fixed template (tiled matmul, knob = TILE).
-- **Not (yet):** searching over kernel *structures* — that's the hard research part
-  (e.g. Mirage's μGraph search with formal equivalence proofs). This tool does the
-  tractable, genuinely useful slice: tune a template you wrote against your hardware.
+- **Done:** empirical tuning + caching over four op categories; grid and random search.
+- **Not (yet):** searching kernel *structures* rather than template params — the research
+  frontier (e.g. Mirage's μGraph search with formal equivalence proofs). This tool does the
+  tractable, useful slice: tune templates you wrote against your hardware.
