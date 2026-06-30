@@ -45,19 +45,28 @@ def benchmark(fn, warmup=10, iters=50):
 
 def _eval_config(name, template, cfg, inputs, ref, run, rtol, atol):
     """Substitute one config into the template, compile, check, benchmark.
-    Returns (label, seconds, ok). Incorrect kernels get time = inf (never chosen)."""
+    Returns (label, seconds, ok). Incorrect or un-launchable kernels get time = inf
+    and ok = False so the search skips them instead of crashing -- a real search
+    space includes configs that fail to compile or exceed hardware limits (registers,
+    threads, shared memory)."""
     label = "_".join(f"{k}{v}" for k, v in cfg.items())
     src = template
     for k, v in cfg.items():
         src = src.replace(f"__{k}__", str(v))
     path = GEN / f"{name}_{label}.cu"
     path.write_text(src)
-    ext = load(name=f"{name}_{label}", sources=[str(path)], verbose=False)
-    fn = getattr(ext, run)
-    out = fn(*inputs)
-    ok = torch.allclose(out, ref, rtol=rtol, atol=atol)
-    t = benchmark(lambda: fn(*inputs)) if ok else float("inf")
-    return label, t, ok
+    try:
+        ext = load(name=f"{name}_{label}", sources=[str(path)], verbose=False)
+        fn = getattr(ext, run)
+        out = fn(*inputs)
+        if DEVICE == "cuda":
+            torch.cuda.synchronize()        # surface async launch errors here, in the try
+        ok = torch.allclose(out, ref, rtol=rtol, atol=atol)
+        t = benchmark(lambda: fn(*inputs)) if ok else float("inf")
+        return label, t, ok
+    except Exception as e:
+        print(f"  {label:24s}  -- skipped ({str(e).splitlines()[0][:50]})")
+        return label, float("inf"), False
 
 
 def make_space(ranges, valid=None):
