@@ -19,7 +19,7 @@ benchmarks (warmup + `cuda.synchronize` + median), and selects.
 - **`random_search()`** — sample a budget from a large space (`make_space` builds + prunes it).
 - **`autotune_cached()`** — tune once per `(op, shape, gpu, template-hash)`, then look up
   instantly (~70,000× faster on a hit). Cache key includes a template hash, so editing a
-  kernel auto-invalidates stale configs.
+  kernel auto-invalidates / prevents stale configs.
 
 ## Ops covered (one engine, four performance categories)
 
