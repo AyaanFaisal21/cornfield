@@ -54,6 +54,8 @@ torch::Tensor run(torch::Tensor X) {
     int nvec = (n + VEC - 1) / VEC;
     int blocks = (nvec + BLOCK - 1) / BLOCK;
     gelu_kernel<<<blocks, BLOCK>>>(Xc.data_ptr<float>(), O.data_ptr<float>(), n);
+    cudaError_t e = cudaGetLastError();           // a failed launch is otherwise silent --
+    TORCH_CHECK(e == cudaSuccess, cudaGetErrorString(e));  // and could pass allclose on stale memory
     return O;
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run", &run); }

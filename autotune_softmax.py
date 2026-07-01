@@ -68,6 +68,8 @@ torch::Tensor run(torch::Tensor X) {
     int threads = RPB * TPR;
     int blocks = (rows + RPB - 1) / RPB;
     softmax_kernel<<<blocks, threads>>>(Xc.data_ptr<float>(), O.data_ptr<float>(), rows, cols);
+    cudaError_t e = cudaGetLastError();           // a failed launch is otherwise silent --
+    TORCH_CHECK(e == cudaSuccess, cudaGetErrorString(e));  // and could pass allclose on stale memory
     return O;
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run", &run); }

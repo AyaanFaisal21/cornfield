@@ -57,6 +57,8 @@ torch::Tensor run(torch::Tensor X, torch::Tensor gamma, torch::Tensor beta) {
     int threads = RPB * TPR, blocks = (rows + RPB - 1) / RPB;
     ln_kernel<<<blocks, threads>>>(Xc.data_ptr<float>(), gamma.data_ptr<float>(),
                                    beta.data_ptr<float>(), O.data_ptr<float>(), rows, cols, 1e-5f);
+    cudaError_t e = cudaGetLastError();           // a failed launch is otherwise silent --
+    TORCH_CHECK(e == cudaSuccess, cudaGetErrorString(e));  // and could pass allclose on stale memory
     return O;
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run", &run); }

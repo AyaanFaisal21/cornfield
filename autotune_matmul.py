@@ -40,6 +40,8 @@ torch::Tensor run(torch::Tensor A, torch::Tensor B) {
     dim3 block(TILE, TILE), grid((N + TILE - 1) / TILE, (M + TILE - 1) / TILE);
     mm<<<grid, block>>>(A.data_ptr<float>(), B.data_ptr<float>(),
                         C.data_ptr<float>(), M, N, K);
+    cudaError_t e = cudaGetLastError();           // a failed launch is otherwise silent --
+    TORCH_CHECK(e == cudaSuccess, cudaGetErrorString(e));  // and could pass allclose on stale memory
     return C;
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run", &run); }
