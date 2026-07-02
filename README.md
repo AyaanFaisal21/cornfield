@@ -20,6 +20,11 @@ benchmarks (warmup + `cuda.synchronize` + median), and selects.
   are **bucketed to powers of two**, so a near-identical shape (1000³ after tuning 1024³)
   is an instant cache hit instead of a fresh search. The cache key includes a template
   hash, so editing a kernel auto-invalidates / prevents stale configs.
+- **Parallel compilation** — compile is ~95% of a trial's wall time and runs on the CPU,
+  so `tune()` compiles all variants in parallel threads (phase 1), then benchmarks them
+  serially (phase 2 — GPU timings must never overlap). **Measured 5.1× (470s → 92s) on an
+  8-config search, identical winner** (`parallel_bench.py`). `workers=1` keeps the
+  original serial path as the archived baseline.
 - **`autotune()`** / **`random_search()`** — the bare strategies, callable directly
   (`make_space` builds + prunes the config space).
 
@@ -62,8 +67,13 @@ Requires CUDA Toolkit 12.x + MSVC (same toolchain as TransformerOp Phase 3).
 
 ## Scope
 
-- **Done:** empirical tuning over four op categories; unified `tune()` API with auto
-  strategy-selection, config caching, and shape-bucketing.
+- **Done:** empirical tuning over five ops (four categories + a fused op with no library
+  equivalent); unified `tune()` API with auto strategy-selection, config caching,
+  shape-bucketing, and parallel compilation (5.1× search wall time).
+- **Rejected:** a hand-written cost model to pre-rank configs — hard-coding "what makes a
+  kernel fast" into the tuner contradicts its premise (performance is hardware-dependent
+  and unpredictable — that's why it measures). A cost model *learned from the tuner's own
+  per-GPU measurements* stays on the table if parallel random search ever stalls.
 - **Not (yet):** searching kernel *structures* rather than template params — the research
   frontier (e.g. Mirage's μGraph search with formal equivalence proofs). This tool does the
   tractable, useful slice: tune templates you wrote against your hardware.

@@ -17,9 +17,11 @@ Entry points:
 import hashlib
 import itertools
 import json
+import os
 import random
 import statistics
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import torch
@@ -46,12 +48,11 @@ def benchmark(fn, warmup=10, iters=50):
     return statistics.median(times)
 
 
-def _eval_config(name, template, cfg, inputs, ref, run, rtol, atol):
-    """Substitute one config into the template, compile, check, benchmark.
-    Returns (label, seconds, ok). Incorrect or un-launchable kernels get time = inf
-    and ok = False so the search skips them instead of crashing -- a real search
-    space includes configs that fail to compile or exceed hardware limits (registers,
-    threads, shared memory)."""
+def _compile_config(name, template, cfg, run):
+    """CPU half of one trial: substitute the config, write the .cu, compile.
+    No GPU work happens here, and nvcc/cl run as subprocesses (the GIL is
+    released), so this is safe to run from parallel threads.
+    Returns (label, fn or None, error-or-None)."""
     label = "_".join(f"{k}{v}" for k, v in cfg.items())
     src = template
     for k, v in cfg.items():
@@ -60,16 +61,40 @@ def _eval_config(name, template, cfg, inputs, ref, run, rtol, atol):
     path.write_text(src)
     try:
         ext = load(name=f"{name}_{label}", sources=[str(path)], verbose=False)
-        fn = getattr(ext, run)
+        return label, getattr(ext, run), None
+    except Exception as e:
+        return label, None, str(e).splitlines()[0][:50]
+
+
+def _measure(fn, inputs, ref, rtol, atol):
+    """GPU half of one trial: correctness gate + benchmark. Must run with the GPU
+    to itself -- two kernels timed concurrently contaminate each other's numbers.
+    Returns (seconds, ok, error-or-None)."""
+    try:
         out = fn(*inputs)
         if DEVICE == "cuda":
             torch.cuda.synchronize()        # surface async launch errors here, in the try
         ok = torch.allclose(out, ref, rtol=rtol, atol=atol)
         t = benchmark(lambda: fn(*inputs)) if ok else float("inf")
-        return label, t, ok
+        return t, ok, None
     except Exception as e:
-        print(f"  {label:24s}  -- skipped ({str(e).splitlines()[0][:50]})")
-        return label, float("inf"), False
+        return float("inf"), False, str(e).splitlines()[0][:50]
+
+
+def _eval_config(name, template, cfg, inputs, ref, run, rtol, atol):
+    """One serial trial: compile then measure, interleaved (the original v1 path).
+    Returns (label, seconds, ok). Incorrect or un-launchable kernels get time = inf
+    and ok = False so the search skips them instead of crashing -- a real search
+    space includes configs that fail to compile or exceed hardware limits (registers,
+    threads, shared memory)."""
+    label, fn, err = _compile_config(name, template, cfg, run)
+    if err is None:
+        t, ok, err = _measure(fn, inputs, ref, rtol, atol)
+    else:
+        t, ok = float("inf"), False
+    if err is not None:
+        print(f"  {label:24s}  -- skipped ({err})")
+    return label, t, ok
 
 
 def make_space(ranges, valid=None):
@@ -136,13 +161,20 @@ def cache_key(name, shape, template):
 
 
 def tune(name, template, space, inputs, ref, shape=None, budget=8, force=False,
-         seed=0, run="run", rtol=1e-3, atol=1e-2):
+         seed=0, run="run", rtol=1e-3, atol=1e-2, workers=None):
     """The front door: cache lookup -> auto strategy -> search -> cache store.
 
     Strategy picks itself: grid and random search are the same loop -- evaluate a
     set of configs, keep the fastest -- differing only in whether that set is the
     whole space or a sample. So if the space fits in the budget, run it all
     (exhaustive, proven-best-in-space); otherwise sample `budget` configs.
+
+    workers=None (default) = one per CPU core. workers>1 splits each trial:
+    phase 1 compiles all variants in parallel threads (compile is a CPU
+    subprocess, ~95% of trial wall time -- measured 5.1x on an 8-config search),
+    phase 2 benchmarks them serially (GPU timing must never overlap).
+    workers=1 is the original serial path (compile+measure interleaved per
+    config), kept as the archived baseline -- parallel_bench.py compares them.
 
     The cache key uses the BUCKETED shape (see bucket_shape), so a shape near one
     already tuned reuses its config instantly. Returns the best config dict."""
@@ -164,13 +196,33 @@ def tune(name, template, space, inputs, ref, shape=None, budget=8, force=False,
     print(f"  cache MISS [{key}] -- strategy: {strategy}")
 
     GEN.mkdir(exist_ok=True)
+    if workers is None:
+        workers = os.cpu_count() or 1
     best = None  # (cfg, label, seconds)
-    for i, cfg in enumerate(picks, 1):
-        label, t, ok = _eval_config(name, template, cfg, inputs, ref, run, rtol, atol)
-        if ok and (best is None or t < best[2]):
-            best = (cfg, label, t)
-        bs = f"{best[2]*1e3:7.3f}" if best else "    inf"
-        print(f"  [{i:2d}/{len(picks)}] {label:24s} {t*1e3:8.3f} ms   best-so-far {bs} ms")
+    if workers > 1:
+        nw = min(workers, len(picks))
+        t0 = time.perf_counter()
+        print(f"  phase 1: compiling {len(picks)} variants, {nw} parallel workers")
+        with ThreadPoolExecutor(max_workers=nw) as pool:
+            built = list(pool.map(lambda c: _compile_config(name, template, c, run), picks))
+        print(f"  phase 2: compiled in {time.perf_counter() - t0:.1f} s -- benchmarking serially")
+        for i, (cfg, (label, fn, err)) in enumerate(zip(picks, built), 1):
+            if err is None:
+                t, ok, err = _measure(fn, inputs, ref, rtol, atol)
+            else:
+                t, ok = float("inf"), False
+            if ok and (best is None or t < best[2]):
+                best = (cfg, label, t)
+            bs = f"{best[2]*1e3:7.3f}" if best else "    inf"
+            note = f"  -- skipped ({err})" if err else ""
+            print(f"  [{i:2d}/{len(picks)}] {label:24s} {t*1e3:8.3f} ms   best-so-far {bs} ms{note}")
+    else:
+        for i, cfg in enumerate(picks, 1):
+            label, t, ok = _eval_config(name, template, cfg, inputs, ref, run, rtol, atol)
+            if ok and (best is None or t < best[2]):
+                best = (cfg, label, t)
+            bs = f"{best[2]*1e3:7.3f}" if best else "    inf"
+            print(f"  [{i:2d}/{len(picks)}] {label:24s} {t*1e3:8.3f} ms   best-so-far {bs} ms")
     if best is None:
         raise RuntimeError(f"tune({name}): no config compiled, launched, and passed allclose")
 
