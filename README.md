@@ -15,11 +15,13 @@ once, and picks the fastest. Spun out of the [TransformerOp](../TransformerOp) p
 a **config space**, and it generates, compiles, correctness-gates (`torch.allclose`),
 benchmarks (warmup + `cuda.synchronize` + median), and selects.
 
-- **`autotune()`** — grid search (small spaces).
-- **`random_search()`** — sample a budget from a large space (`make_space` builds + prunes it).
-- **`autotune_cached()`** — tune once per `(op, shape, gpu, template-hash)`, then look up
-  instantly (~70,000× faster on a hit). Cache key includes a template hash, so editing a
-  kernel auto-invalidates / prevents stale configs.
+- **`tune()`** — the front door. One call: cache lookup → auto strategy (grid if the
+  space fits the budget, random sampling otherwise) → search → cache the winner. Shapes
+  are **bucketed to powers of two**, so a near-identical shape (1000³ after tuning 1024³)
+  is an instant cache hit instead of a fresh search. The cache key includes a template
+  hash, so editing a kernel auto-invalidates / prevents stale configs.
+- **`autotune()`** / **`random_search()`** — the bare strategies, callable directly
+  (`make_space` builds + prunes the config space).
 
 ## Ops covered (one engine, four performance categories)
 
@@ -42,7 +44,7 @@ it's a *kernel* tuner, not a matmul tuner.
 # reuses TransformerOp's venv; winbuild.bat sets up the MSVC build env
 & ".\winbuild.bat" -m autotune_sgemm          # register-tiled matmul
 & ".\winbuild.bat" -m autotune_sgemm_search   # random search over the config space
-& ".\winbuild.bat" -m autotune_cached_demo    # config cache: tune once, look up
+& ".\winbuild.bat" -m tune_demo               # unified tune(): auto strategy + cache + shape buckets
 & ".\winbuild.bat" -m autotune_softmax        # reduction op
 & ".\winbuild.bat" -m autotune_gelu           # elementwise op
 & ".\winbuild.bat" -m autotune_layernorm      # fused op
@@ -52,7 +54,8 @@ Requires CUDA Toolkit 12.x + MSVC (same toolchain as TransformerOp Phase 3).
 
 ## Scope
 
-- **Done:** empirical tuning + caching over four op categories; grid and random search.
+- **Done:** empirical tuning over four op categories; unified `tune()` API with auto
+  strategy-selection, config caching, and shape-bucketing.
 - **Not (yet):** searching kernel *structures* rather than template params — the research
   frontier (e.g. Mirage's μGraph search with formal equivalence proofs). This tool does the
   tractable, useful slice: tune templates you wrote against your hardware.

@@ -1,4 +1,30 @@
 {
+  "mm|1024x1024x1024|NVIDIA GeForce RTX 2060 SUPER|799655f4": {
+    "config": {
+      "TILE": 16
+    },
+    "label": "TILE16",
+    "shape": [
+      1024,
+      1024,
+      1024
+    ],
+    "strategy": "grid (3 configs)",
+    "time_ms": 4.326600000013059
+  },
+  "mm|256x4096x256|NVIDIA GeForce RTX 2060 SUPER|799655f4": {
+    "config": {
+      "TILE": 32
+    },
+    "label": "TILE32",
+    "shape": [
+      256,
+      4096,
+      256
+    ],
+    "strategy": "random 2 of 3",
+    "time_ms": 0.9376000000429485
+  },
   "sgemm|1024x1024x1024|NVIDIA GeForce RTX 2060 SUPER|3920d653": {
     "config": {
       "BK": 8,

@@ -6,9 +6,12 @@ depends on shape AND hardware, and you can't reliably predict it -- so generate
 candidate kernels, measure them on the real device, and select. That's exactly
 why cuBLAS / cuDNN / Triton autotune.
 
-Search strategies:
-  - autotune()      : grid -- try every config in a list (fine for small spaces).
-  - random_search() : sample a budget of configs from a large space (scales).
+Entry points:
+  - tune()          : the front door -- cache lookup, then auto-picks grid vs
+                      random by whether the space fits the budget; caches the winner
+                      keyed on op | bucketed-shape | gpu | template-hash.
+  - autotune()      : bare grid search -- try every config in a list.
+  - random_search() : bare random search -- sample a budget from a large space.
 """
 
 import hashlib
@@ -117,6 +120,14 @@ def _gpu():
     return torch.cuda.get_device_name(0) if DEVICE == "cuda" else "cpu"
 
 
+def bucket_shape(shape):
+    """Round each dim up to the next power of two. Nearby shapes (1000 vs 1024)
+    almost always share a winning config, so exact-shape cache keys would force a
+    full re-search for every slightly-new shape. Bucketing trades a little
+    precision at bucket boundaries for far more cache hits (force=True re-tunes)."""
+    return tuple(1 << max(0, (int(d) - 1).bit_length()) for d in shape)
+
+
 def cache_key(name, shape, template):
     """Key on op + shape + GPU + a template hash. The template hash auto-invalidates
     the cache when you change the kernel, so you never get a stale config."""
@@ -124,22 +135,48 @@ def cache_key(name, shape, template):
     return f"{name}|{'x'.join(map(str, shape))}|{_gpu()}|{th}"
 
 
-def autotune_cached(name, template, space, inputs, ref, shape, budget=8,
-                    force=False, seed=0, run="run", rtol=1e-3, atol=1e-2):
-    """Look up the best config for (op, shape, gpu, template); search + store on a miss."""
-    cache = json.loads(CACHE.read_text()) if CACHE.exists() else {}
-    key = cache_key(name, shape, template)
+def tune(name, template, space, inputs, ref, shape=None, budget=8, force=False,
+         seed=0, run="run", rtol=1e-3, atol=1e-2):
+    """The front door: cache lookup -> auto strategy -> search -> cache store.
 
+    Strategy picks itself: grid and random search are the same loop -- evaluate a
+    set of configs, keep the fastest -- differing only in whether that set is the
+    whole space or a sample. So if the space fits in the budget, run it all
+    (exhaustive, proven-best-in-space); otherwise sample `budget` configs.
+
+    The cache key uses the BUCKETED shape (see bucket_shape), so a shape near one
+    already tuned reuses its config instantly. Returns the best config dict."""
+    if shape is None:   # default: every dim of every tensor input identifies the problem size
+        shape = tuple(d for t in inputs if hasattr(t, "shape") for d in t.shape)
+
+    cache = json.loads(CACHE.read_text()) if CACHE.exists() else {}
+    key = cache_key(name, bucket_shape(shape), template)
     if not force and key in cache:
         e = cache[key]
         print(f"  cache HIT  [{key}]\n    -> {e['config']}  ({e['time_ms']:.3f} ms, no search)")
         return e["config"]
 
-    print(f"  cache MISS [{key}] -- searching")
-    best = random_search(name, template, space, inputs, ref, budget,
-                         seed=seed, run=run, rtol=rtol, atol=atol)
+    if len(space) <= budget:
+        picks, strategy = list(space), f"grid ({len(space)} configs)"
+    else:
+        picks = random.Random(seed).sample(space, budget)
+        strategy = f"random {budget} of {len(space)}"
+    print(f"  cache MISS [{key}] -- strategy: {strategy}")
+
+    GEN.mkdir(exist_ok=True)
+    best = None  # (cfg, label, seconds)
+    for i, cfg in enumerate(picks, 1):
+        label, t, ok = _eval_config(name, template, cfg, inputs, ref, run, rtol, atol)
+        if ok and (best is None or t < best[2]):
+            best = (cfg, label, t)
+        bs = f"{best[2]*1e3:7.3f}" if best else "    inf"
+        print(f"  [{i:2d}/{len(picks)}] {label:24s} {t*1e3:8.3f} ms   best-so-far {bs} ms")
+    if best is None:
+        raise RuntimeError(f"tune({name}): no config compiled, launched, and passed allclose")
+
     cfg, label, secs = best
-    cache[key] = {"config": cfg, "label": label, "time_ms": secs * 1e3}
+    cache[key] = {"config": cfg, "label": label, "time_ms": secs * 1e3,
+                  "strategy": strategy, "shape": list(shape)}
     CACHE.write_text(json.dumps(cache, indent=2, sort_keys=True))
-    print(f"  cached best for [{key}]")
+    print(f"\n  best: {label}  ({secs*1e3:.3f} ms)  -- cached for [{key}]")
     return cfg
