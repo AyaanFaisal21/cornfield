@@ -31,6 +31,13 @@ benchmarks (warmup + `cuda.synchronize` + median), and selects.
 | softmax | reduction | `TPR RPB` (threads/row, rows/block) | beat on short rows; ~1.1× on wide |
 | gelu | elementwise (memory-bound) | `VEC BLOCK` (vectorization width) | ~matched |
 | layernorm | fused (reduction + affine) | `TPR RPB` | beat on wide rows; ~matched on short |
+| **bias+gelu** | **fused, no library equivalent** | `VEC BLOCK` | **1.9× over eager (2 kernels → 1)** |
+
+bias+gelu is the tuner's real niche: eager torch has *no single op* for it (add kernel +
+gelu kernel = 4 memory passes; fused = 2), and libraries can't pre-tune the combinatorial
+space of fused ops. Fusion supplies the structural win (even our worst config beat eager);
+tuning picks the best config *within* the fused space (a further ~25%, and the winning
+vector width differed from plain gelu's — unpredictable as ever).
 
 In every op the optimal config is **shape-dependent and discovered by measurement**: the
 matmul tile flips with matrix shape; for the reduction ops (softmax, layernorm) the winner
@@ -48,6 +55,7 @@ it's a *kernel* tuner, not a matmul tuner.
 & ".\winbuild.bat" -m autotune_softmax        # reduction op
 & ".\winbuild.bat" -m autotune_gelu           # elementwise op
 & ".\winbuild.bat" -m autotune_layernorm      # fused op
+& ".\winbuild.bat" -m autotune_bias_gelu      # fused op with NO library reference (via tune())
 ```
 
 Requires CUDA Toolkit 12.x + MSVC (same toolchain as TransformerOp Phase 3).

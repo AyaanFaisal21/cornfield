@@ -1,4 +1,17 @@
 {
+  "bias_gelu|4096x4096|NVIDIA GeForce RTX 2060 SUPER|0aad03b7": {
+    "config": {
+      "BLOCK": 512,
+      "VEC": 4
+    },
+    "label": "VEC4_BLOCK512",
+    "shape": [
+      4096,
+      4096
+    ],
+    "strategy": "grid (6 configs)",
+    "time_ms": 0.40625000019645086
+  },
   "mm|1024x1024x1024|NVIDIA GeForce RTX 2060 SUPER|799655f4": {
     "config": {
       "TILE": 16
