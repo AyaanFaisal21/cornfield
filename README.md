@@ -72,7 +72,7 @@ Requires CUDA Toolkit 12.x + MSVC (same toolchain as TransformerOp Phase 3).
   shape-bucketing, and parallel compilation (5.1× search wall time).
 - **Rejected:** a hand-written cost model to pre-rank configs — hard-coding "what makes a
   kernel fast" into the tuner contradicts its premise (performance is hardware-dependent
-  and unpredictable — that's why it measures). A cost model *learned from the tuner's own
+  and unpredictable: that's why it measures). A cost model *learned from the tuner's own
   per-GPU measurements* stays on the table if parallel random search ever stalls.
 - **Not (yet):** searching kernel *structures* rather than template params — the research
   frontier (e.g. Mirage's μGraph search with formal equivalence proofs). This tool does the
