@@ -15,7 +15,7 @@ parallel_bench.py races against.
 import hashlib
 import itertools
 import json
-import os3
+import os
 import random
 import statistics
 import time
