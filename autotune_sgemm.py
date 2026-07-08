@@ -1,12 +1,11 @@
-"""Autotune a register-tiled (2D block-tiling) SGEMM.
+"""register-tiled sgemm, the increment that actually closed distance to cuBLAS.
 
-Adds the knob that matters: each thread computes a TM x TN grid of outputs, loading
-TM+TN operands into registers and reusing them across TM*TN multiply-adds. That
-raises arithmetic intensity (compute per memory load) -- the lever that moves a matmul
-from shared-memory-bound toward compute-bound, i.e. toward cuBLAS.
-
-Five knobs (BM, BN, BK, TM, TN) -> a big, unpredictable config space, which is exactly
-where autotuning pays off. Invalid configs are pruned before compiling.
+the knob that matters: each thread computes a TM x TN patch of outputs, pulling TM+TN
+operands into registers and reusing them across TM*TN multiply-adds. more compute per
+byte loaded, which is the lever that drags a matmul from memory-bound toward
+compute-bound. five knobs now (BM BN BK TM TN), so the space is big and unpredictable,
+exactly where searching beats guessing. configs that can't launch get pruned before
+we waste a compile on them.
 
     cmd /c "winbuild.bat -m autotune_sgemm"     # from the KernelTuner dir
 """
@@ -80,7 +79,7 @@ torch::Tensor run(torch::Tensor A, torch::Tensor B) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run", &run); }
 """
 
-# candidate configs; invalid ones are pruned below before compiling
+# hand-picked candidates; the pruned full space lives in autotune_sgemm_search.py
 CANDIDATES = [
     {"BM": 64,  "BN": 64,  "BK": 8,  "TM": 4, "TN": 4},
     {"BM": 64,  "BN": 64,  "BK": 16, "TM": 4, "TN": 4},
@@ -92,6 +91,7 @@ CANDIDATES = [
 
 
 def valid(c):
+    # hardware limits straight off the spec sheet: divisibility, 1024 threads, 48KB smem
     threads = (c["BM"] // c["TM"]) * (c["BN"] // c["TN"])
     smem = (c["BM"] * c["BK"] + c["BK"] * c["BN"]) * 4
     return (c["BM"] % c["TM"] == 0 and c["BN"] % c["TN"] == 0

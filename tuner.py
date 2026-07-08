@@ -1,23 +1,21 @@
-"""Autotuning harness: generate kernel variants, compile, correctness-check,
-benchmark, and pick the winner for the given shape + GPU.
+"""the engine. every other file in this repo is just a kernel template plus a config
+space fed into this.
 
-Thesis (learned the hard way in the TransformerOp project): the fastest kernel
-depends on shape AND hardware, and you can't reliably predict it -- so generate
-candidate kernels, measure them on the real device, and select. That's exactly
-why cuBLAS / cuDNN / Triton autotune.
+premise, learned the hard way in prev project TransformerOp: the fastest kernel depends on shape
+and hardware and you can't predict it, so don't. generate variants, compile them,
+make sure they're actually correct, time them on the real card, keep the winner.
+same reason cuBLAS / cuDNN / triton all autotune.
 
-Entry points:
-  - tune()          : the front door -- cache lookup, then auto-picks grid vs
-                      random by whether the space fits the budget; caches the winner
-                      keyed on op | bucketed-shape | gpu | template-hash.
-  - autotune()      : bare grid search -- try every config in a list.
-  - random_search() : bare random search -- sample a budget from a large space.
+tune() is the entry point you actually want (cache -> pick a strategy -> search ->
+store the winner). autotune() and random_search() are the bare strategies underneath,
+still used directly by the op scripts and kept as the serial baseline that
+parallel_bench.py races against.
 """
 
 import hashlib
 import itertools
 import json
-import os
+import os3
 import random
 import statistics
 import time
@@ -28,12 +26,13 @@ import torch
 from torch.utils.cpp_extension import load
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-GEN = Path(__file__).parent / ".gen"        # generated .cu variants land here
-CACHE = Path(__file__).parent / "cache.json"  # tuned configs, keyed by op|shape|gpu|template
+GEN = Path(__file__).parent / ".gen"          # generated .cu variants land here
+CACHE = Path(__file__).parent / "cache.json"  # tuned winners, machine-specific so not committed
 
 
 def benchmark(fn, warmup=10, iters=50):
-    """Median wall-clock seconds per call, GPU-synchronized."""
+    """median seconds per call. warmup first, sync around every timed call so we're
+    timing the gpu and not just the launch queue."""
     for _ in range(warmup):
         fn()
     if DEVICE == "cuda":
@@ -49,14 +48,14 @@ def benchmark(fn, warmup=10, iters=50):
 
 
 def _compile_config(name, template, cfg, run):
-    """CPU half of one trial: substitute the config, write the .cu, compile.
-    No GPU work happens here, and nvcc/cl run as subprocesses (the GIL is
-    released), so this is safe to run from parallel threads.
-    Returns (label, fn or None, error-or-None)."""
+    """cpu half of one trial: fill the config into the template, write the .cu,
+    compile it. no gpu work happens here, and nvcc/cl run as subprocesses (GIL
+    released), so this half is safe to fan out across threads.
+    returns (label, fn or None, err or None)."""
     label = "_".join(f"{k}{v}" for k, v in cfg.items())
     src = template
     for k, v in cfg.items():
-        src = src.replace(f"__{k}__", str(v))
+        src = src.replace(f"__{k}__", str(v))   # plain str.replace, C code is full of {}
     path = GEN / f"{name}_{label}.cu"
     path.write_text(src)
     try:
@@ -67,13 +66,13 @@ def _compile_config(name, template, cfg, run):
 
 
 def _measure(fn, inputs, ref, rtol, atol):
-    """GPU half of one trial: correctness gate + benchmark. Must run with the GPU
-    to itself -- two kernels timed concurrently contaminate each other's numbers.
-    Returns (seconds, ok, error-or-None)."""
+    """gpu half of one trial: correctness check, then the stopwatch. runs alone on
+    the gpu on purpose, two kernels timed at once contaminate each other's numbers.
+    returns (seconds, ok, err or None)."""
     try:
         out = fn(*inputs)
         if DEVICE == "cuda":
-            torch.cuda.synchronize()        # surface async launch errors here, in the try
+            torch.cuda.synchronize()    # async launch errors surface here, inside the try
         ok = torch.allclose(out, ref, rtol=rtol, atol=atol)
         t = benchmark(lambda: fn(*inputs)) if ok else float("inf")
         return t, ok, None
@@ -82,11 +81,10 @@ def _measure(fn, inputs, ref, rtol, atol):
 
 
 def _eval_config(name, template, cfg, inputs, ref, run, rtol, atol):
-    """One serial trial: compile then measure, interleaved (the original v1 path).
-    Returns (label, seconds, ok). Incorrect or un-launchable kernels get time = inf
-    and ok = False so the search skips them instead of crashing -- a real search
-    space includes configs that fail to compile or exceed hardware limits (registers,
-    threads, shared memory)."""
+    """one serial trial, compile then measure back to back (the original loop).
+    anything that fails to compile, launch, or match the reference scores inf
+    instead of crashing the search, since real spaces are full of configs that
+    blow past some hardware limit (registers, threads, shared memory)."""
     label, fn, err = _compile_config(name, template, cfg, run)
     if err is None:
         t, ok, err = _measure(fn, inputs, ref, rtol, atol)
@@ -98,15 +96,15 @@ def _eval_config(name, template, cfg, inputs, ref, run, rtol, atol):
 
 
 def make_space(ranges, valid=None):
-    """Cartesian product of knob value-lists -> list of config dicts, optionally
-    filtered by a validity predicate (prune kernels that can't launch)."""
+    """cartesian product of the knob ranges into config dicts, minus anything the
+    validity check says can't launch (no point compiling those)."""
     keys = list(ranges)
     space = [dict(zip(keys, vals)) for vals in itertools.product(*ranges.values())]
     return [c for c in space if valid(c)] if valid else space
 
 
 def autotune(name, template, configs, inputs, ref, run="run", rtol=1e-3, atol=1e-2):
-    """Grid search: evaluate every config; return results fastest-first."""
+    """plain grid search: run every config in the list, return results fastest first."""
     GEN.mkdir(exist_ok=True)
     results = []
     for cfg in configs:
@@ -121,8 +119,9 @@ def autotune(name, template, configs, inputs, ref, run="run", rtol=1e-3, atol=1e
 
 def random_search(name, template, space, inputs, ref, budget, seed=0,
                   run="run", rtol=1e-3, atol=1e-2):
-    """Sample `budget` configs from `space`, evaluate them, track the running best.
-    Finds a near-optimal config without compiling the whole space."""
+    """sample `budget` configs from a space too big to grid, keep the running best.
+    good configs turned out to be common in these spaces (first run found its winner
+    on trial 1), so a small sample gets near-best at a fraction of the compiles."""
     GEN.mkdir(exist_ok=True)
     picks = random.Random(seed).sample(space, min(budget, len(space)))
     print(f"  random search: {len(picks)} of {len(space)} configs (seed={seed})")
@@ -139,46 +138,42 @@ def random_search(name, template, space, inputs, ref, budget, seed=0,
     return best  # (cfg dict, label, seconds)
 
 
-# ---- config cache: tune once per (op, shape, gpu, template), then look it up ----
+# ---- config cache: tune once per (op, shape, gpu, template), look it up after ----
 
 def _gpu():
     return torch.cuda.get_device_name(0) if DEVICE == "cuda" else "cpu"
 
 
 def bucket_shape(shape):
-    """Round each dim up to the next power of two. Nearby shapes (1000 vs 1024)
-    almost always share a winning config, so exact-shape cache keys would force a
-    full re-search for every slightly-new shape. Bucketing trades a little
-    precision at bucket boundaries for far more cache hits (force=True re-tunes)."""
+    """round every dim up to the next power of two. nearby shapes (1000 vs 1024)
+    almost always want the same config, so exact-shape keys would pay a full search
+    for every slightly new shape. costs some precision right at bucket edges,
+    force=True retunes exactly if that ever matters."""
     return tuple(1 << max(0, (int(d) - 1).bit_length()) for d in shape)
 
 
 def cache_key(name, shape, template):
-    """Key on op + shape + GPU + a template hash. The template hash auto-invalidates
-    the cache when you change the kernel, so you never get a stale config."""
+    """op + shape + gpu + a hash of the template. the hash part means editing a
+    kernel quietly invalidates its old entries, so stale configs never come back."""
     th = hashlib.md5(template.encode()).hexdigest()[:8]
     return f"{name}|{'x'.join(map(str, shape))}|{_gpu()}|{th}"
 
 
 def tune(name, template, space, inputs, ref, shape=None, budget=8, force=False,
          seed=0, run="run", rtol=1e-3, atol=1e-2, workers=None):
-    """The front door: cache lookup -> auto strategy -> search -> cache store.
+    """the entry point: cache lookup, search on a miss, store the winner.
 
-    Strategy picks itself: grid and random search are the same loop -- evaluate a
-    set of configs, keep the fastest -- differing only in whether that set is the
-    whole space or a sample. So if the space fits in the budget, run it all
-    (exhaustive, proven-best-in-space); otherwise sample `budget` configs.
+    strategy picks itself with one comparison, because grid and random are the same
+    loop and only differ in whether the pick set is the whole space or a sample:
+    space fits in the budget -> run all of it, otherwise sample `budget` configs.
 
-    workers=None (default) = one per CPU core. workers>1 splits each trial:
-    phase 1 compiles all variants in parallel threads (compile is a CPU
-    subprocess, ~95% of trial wall time -- measured 5.1x on an 8-config search),
-    phase 2 benchmarks them serially (GPU timing must never overlap).
-    workers=1 is the original serial path (compile+measure interleaved per
-    config), kept as the archived baseline -- parallel_bench.py compares them.
+    workers=None means one per cpu core: compile every pick in parallel first (that
+    is nearly all of the wall time and it's cpu work), then benchmark one at a time
+    since gpu timings must never overlap. workers=1 is the old interleaved serial
+    loop, kept on purpose as the baseline (parallel_bench.py races the two).
 
-    The cache key uses the BUCKETED shape (see bucket_shape), so a shape near one
-    already tuned reuses its config instantly. Returns the best config dict."""
-    if shape is None:   # default: every dim of every tensor input identifies the problem size
+    cache keys use the bucketed shape (see bucket_shape). returns the winning config."""
+    if shape is None:   # fall back to every dim of every tensor input as the problem size
         shape = tuple(d for t in inputs if hasattr(t, "shape") for d in t.shape)
 
     cache = json.loads(CACHE.read_text()) if CACHE.exists() else {}
@@ -188,6 +183,7 @@ def tune(name, template, space, inputs, ref, shape=None, budget=8, force=False,
         print(f"  cache HIT  [{key}]\n    -> {e['config']}  ({e['time_ms']:.3f} ms, no search)")
         return e["config"]
 
+    # miss: decide how much of the space we can afford to look at
     if len(space) <= budget:
         picks, strategy = list(space), f"grid ({len(space)} configs)"
     else:
@@ -200,12 +196,14 @@ def tune(name, template, space, inputs, ref, shape=None, budget=8, force=False,
         workers = os.cpu_count() or 1
     best = None  # (cfg, label, seconds)
     if workers > 1:
+        # phase 1: all the compiles at once (cpu subprocess work, threads scale fine)
         nw = min(workers, len(picks))
         t0 = time.perf_counter()
         print(f"  phase 1: compiling {len(picks)} variants, {nw} parallel workers")
         with ThreadPoolExecutor(max_workers=nw) as pool:
             built = list(pool.map(lambda c: _compile_config(name, template, c, run), picks))
         print(f"  phase 2: compiled in {time.perf_counter() - t0:.1f} s -- benchmarking serially")
+        # phase 2: the gpu gets each kernel to itself
         for i, (cfg, (label, fn, err)) in enumerate(zip(picks, built), 1):
             if err is None:
                 t, ok, err = _measure(fn, inputs, ref, rtol, atol)
@@ -217,6 +215,7 @@ def tune(name, template, space, inputs, ref, shape=None, budget=8, force=False,
             note = f"  -- skipped ({err})" if err else ""
             print(f"  [{i:2d}/{len(picks)}] {label:24s} {t*1e3:8.3f} ms   best-so-far {bs} ms{note}")
     else:
+        # the original serial path: compile + measure per config, interleaved
         for i, cfg in enumerate(picks, 1):
             label, t, ok = _eval_config(name, template, cfg, inputs, ref, run, rtol, atol)
             if ok and (best is None or t < best[2]):

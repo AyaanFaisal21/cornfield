@@ -1,6 +1,6 @@
-"""Autotune a shared-memory tiled matmul: which TILE size is fastest for a given
-shape on this GPU? Demonstrates the thesis -- the best config isn't predictable,
-and (run a few shapes) it changes with the shape.
+"""first tuner: shared-memory tiled matmul with a single knob (TILE). run the three
+shapes below and watch the winner move (16 for square, 32 for skewed on my card).
+that unpredictability is the whole reason this project exists.
 
     cmd /c "winbuild.bat -m autotune_matmul"     # from the KernelTuner dir
 """
@@ -9,8 +9,8 @@ import torch
 
 from tuner import DEVICE, autotune, benchmark
 
-# Tiled matmul C = A@B. One tunable knob: TILE (shared-memory tile edge).
-# `__TILE__` is substituted by the tuner (str.replace, so C's own {} are safe).
+# one knob: TILE, the shared-memory tile edge. __TILE__ gets substituted by the
+# tuner before compiling.
 TEMPLATE = r"""
 #include <torch/extension.h>
 #include <cuda_runtime.h>
@@ -56,6 +56,7 @@ def tune_shape(M, K, N):
     ref = A @ B
     print(f"\nmatmul {M}x{K} @ {K}x{N}")
     autotune("mm", TEMPLATE, CONFIGS, (A, B), ref)
+    # cuBLAS printed as the reality check, not a target this simple kernel can hit
     t = benchmark(lambda: A @ B)
     print(f"  torch (cuBLAS): {t*1e3:.3f} ms   <-- the unbeatable reference")
 

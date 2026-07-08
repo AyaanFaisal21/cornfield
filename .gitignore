@@ -1,6 +1,7 @@
+# tuned configs are machine-specific (keyed by GPU), regenerated on demand
+cache.json
 .gen/
 __pycache__/
 *.pyd
 *.lib
 *.exp
-cache.json   # tuned configs are machine-specific (keyed by GPU); regenerated on demand

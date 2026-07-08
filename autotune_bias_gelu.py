@@ -1,18 +1,17 @@
-"""Fused bias+GELU -- the first op here with NO library reference to lose to.
+"""fused bias+gelu . . . first op here with no library reference to lose to.
 
-This is the transformer MLP epilogue: GELU(XW + b). Eager torch runs it as TWO
-kernels -- add (read X, write tmp), then gelu (read tmp, write out) = 4 full
-passes over the data. Fusing them into one kernel is read -> compute -> write =
-2 passes. On a memory-bound op that's a structural ~2x that no per-kernel tuning
-of the baseline can recover. This is the tuner's real niche: libraries can't
-pre-tune the combinatorial space of fused ops, so "generate + measure + select"
-is how the best implementation gets found (exactly what Triton/torch.compile do).
+this is the transformer MLP epilogue, gelu(x + b). eager torch runs it as two kernels
+(add, then gelu), 4 trips over the data; fused is read -> compute -> write, 2 trips.
+on a memory-bound op that's a structural ~2x that no amount of tuning the baseline
+gets back. this is the actual niche for the tuner: nobody ships pre-tuned binaries for
+every fused combo, so generate + measure + select is how these get found (same thing
+triton / torch.compile do).
 
-Bias indexing: X is row-major (rows, cols), bias is per-column, so flat element
-i adds b[i % cols]. The modulo is ALU cost on a memory-bound kernel (free), and
-the 16KB bias vector stays L1/L2-resident after first touch.
+bias indexing: x is row-major (rows, cols) and bias is per-column, so flat element i
+adds b[i % cols]. the modulo is alu work on a memory-bound kernel, basically free, and
+the 16KB bias sits in L1/L2 after first touch.
 
-Uses tune() -- the v2 front door: auto strategy + config cache + shape buckets.
+goes through tune(), so the cache, auto strategy, and parallel compiles all apply.
 
     cmd /c "winbuild.bat -m autotune_bias_gelu"     # from the KernelTuner dir
 """
@@ -82,7 +81,7 @@ def main():
     print(f"fused bias+gelu, {rows} x {cols}  (space: {len(space)} configs)")
     tune("bias_gelu", TEMPLATE, space, (X, b), ref, shape=(rows, cols), atol=1e-4)
 
-    # the baseline is a CHAIN of library calls, not one optimal call: 2 kernels, 4 memory passes
+    # the baseline is a chain of library calls, not one optimal call: 2 kernels, 4 memory passes
     t = benchmark(lambda: F.gelu(X + b, approximate="tanh"))
     print(f"  torch eager (add + gelu, 2 kernels): {t*1e3:.3f} ms")
 

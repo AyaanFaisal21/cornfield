@@ -1,10 +1,9 @@
-"""Autotune LayerNorm -- a FUSED op: a reduction (mean + variance over each row) AND
-an elementwise affine (normalize, scale, shift) in one kernel. Reduction-shaped, so it
-reuses softmax's knobs (TPR = threads per row, RPB = rows per block), but it fuses the
-reduction with the elementwise pass -- the "fused" category, where custom kernels earn
-their keep by not re-reading the data.
+"""layernorm tuner -- the fused category: a reduction (mean and variance per row) and
+an elementwise affine pass welded into one kernel, so the data isn't re-read between
+them. reduction-shaped, so it borrows softmax's knobs (TPR / RPB) and shows the same
+warp-vs-block flip with row length.
 
-Fourth op category (compute-bound / reduction / elementwise / fused) -- same engine.
+one stats pass accumulates sum and sum-of-squares together instead of two passes.
 
     cmd /c "winbuild.bat -m autotune_layernorm"     # from the KernelTuner dir
 """

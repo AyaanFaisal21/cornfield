@@ -44,6 +44,25 @@ space of fused ops. Fusion supplies the structural win (even our worst config be
 tuning picks the best config *within* the fused space (a further ~25%, and the winning
 vector width differed from plain gelu's — unpredictable as ever).
 
+## Fusion generator (`fusegen.py`)
+
+Hand-writing one CUDA template per fused op is the same non-scaling move as a library
+shipping one pre-tuned binary per combination. `fusegen.py` makes a fused elementwise op
+cost **one line** — `fuse_and_tune(["bias_add", "gelu"], X, (b,))` — by assembling the
+kernel from registered per-op C expressions (one load → chain of ops → one store) and
+composing the eager torch chain automatically as both correctness oracle and baseline.
+The template goes to the *unchanged* `tune()` engine. Elementwise chains are the class
+where generated structures are **correct by construction**, so no equivalence machinery
+is needed (that's the frontier for general structure search).
+
+Measured (4096×4096, same-run comparisons): the generated bias+gelu **matched the
+hand-written kernel** (0.398 ms, same winning config); two never-hand-written chains came
+free — `relu(x+res)` 2.2× over eager, `gelu(x+b)+res` 2.5× (the win grows with chain
+length: eager pays 2 memory passes per op, fused pays 2 total). The 3-op chain's winner
+was VEC2, not VEC4 — the best config flips with chain *content*, so even generated
+kernels need the tuner. Registry: 6 ops (1 line each to add more) → 30+ two-op chains,
+hundreds of three-op chains, zero new CUDA.
+
 In every op the optimal config is **shape-dependent and discovered by measurement**: the
 matmul tile flips with matrix shape; for the reduction ops (softmax, layernorm) the winner
 flips between warp-per-row (`TPR=32`, short rows) and block-per-row (`TPR=256`, long rows);
@@ -61,6 +80,8 @@ it's a *kernel* tuner, not a matmul tuner.
 & ".\winbuild.bat" -m autotune_gelu           # elementwise op
 & ".\winbuild.bat" -m autotune_layernorm      # fused op
 & ".\winbuild.bat" -m autotune_bias_gelu      # fused op with NO library reference (via tune())
+& ".\winbuild.bat" -m fusegen_demo            # fusion generator: 1-line fused ops
+& ".\winbuild.bat" -m parallel_bench          # serial vs parallel-compile head-to-head
 ```
 
 Requires CUDA Toolkit 12.x + MSVC (same toolchain as TransformerOp Phase 3).
@@ -75,5 +96,7 @@ Requires CUDA Toolkit 12.x + MSVC (same toolchain as TransformerOp Phase 3).
   and unpredictable: that's why it measures). A cost model *learned from the tuner's own
   per-GPU measurements* stays on the table if parallel random search ever stalls.
 - **Not (yet):** searching kernel *structures* rather than template params — the research
-  frontier (e.g. Mirage's μGraph search with formal equivalence proofs). This tool does the
-  tractable, useful slice: tune templates you wrote against your hardware.
+  frontier (e.g. Mirage's μGraph search with formal equivalence proofs). The fusion
+  generator is the first rung (it *generates* structures, but only in the class that's
+  correct by construction); the frontier starts where candidate structures need
+  equivalence reasoning to trust.

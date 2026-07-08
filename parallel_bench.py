@@ -1,15 +1,17 @@
-"""v2 Theme B (revised: search THROUGHPUT, not intelligence): is parallel
-compilation a meaningful addition? Decide it the project's way -- measure.
+"""is parallel compilation actually worth keeping? decide it the way everything else
+here gets decided: race it.
 
-Both arms run the IDENTICAL search (sgemm, random 8 of 32, seed 0 -> same 8
-configs). Compile is ~95% of trial wall time and nvcc/cl are CPU subprocesses,
-so the parallel arm should approach serial_time / min(workers, cpu_cores).
+both arms run the identical search (sgemm, random 8 of 32, seed 0, same picks).
+compile is basically all of the wall time and nvcc/cl are cpu subprocesses, so the
+parallel arm should collapse toward the cost of the slowest single compile.
 
-Fairness: torch caches builds by source hash, so whichever arm ran second would
-reuse the first arm's binaries and win unfairly. Each arm's template gets a
-unique salt comment -- changes the hash, not the code -- forcing both to compile
-all 8 variants from scratch. force=True bypasses the config cache. The parallel
-arm runs FIRST so a bug in the new path fails fast.
+fairness details that matter: torch caches builds by source hash, so whichever arm ran
+second would inherit the first arm's binaries and win for free . . . each arm's template
+gets its own salt comment (changes the hash, not the code) so both compile all 8 from
+scratch. force=True skips the config cache. the parallel arm goes first so a bug in
+the newer path fails fast instead of after 8 minutes of serial compiling.
+
+result on this box: 470s serial -> 92s parallel, 5.1x, same winner both arms.
 
     cmd /c "winbuild.bat -m parallel_bench"     # from the KernelTuner dir
 """

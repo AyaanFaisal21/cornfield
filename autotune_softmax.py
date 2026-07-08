@@ -1,15 +1,15 @@
-"""Autotune a row-wise softmax -- a memory-bound *reduction* op, structurally
-unlike matmul. Proves the engine is op-agnostic: same autotune/cache machinery,
-totally different knobs.
+"""softmax tuner -- second op, and a different animal from matmul: a memory-bound row
+reduction. proves the engine doesn't care what the op is, only the template and the
+knobs changed.
 
-Knobs:
-  TPR -- threads cooperating per row (low ~ warp-per-row for short rows; high ~
-         block-per-row for long rows). The key, cols-dependent decision.
-  RPB -- rows packed per block (occupancy).
+knobs: TPR = threads cooperating on one row (32 means a warp per row, 256 means the
+whole block works one row), RPB = rows packed per block for occupancy. which TPR wins
+depends on row length, and it flips exactly where you'd hope: warp-per-row on short
+rows, block-per-row on long ones.
 
-3-pass, numerically stable (subtract row max). Reduction across the TPR threads of
-each row via shared memory (works for any TPR). Inactive threads still hit every
-__syncthreads (no early return) to avoid deadlock.
+kernel is 3-pass and numerically stable (subtract the row max). the reduction goes
+through shared memory so any TPR works, and inactive threads still hit every
+__syncthreads -- an early return around a barrier deadlocks the block.
 
     cmd /c "winbuild.bat -m autotune_softmax"     # from the KernelTuner dir
 """
@@ -91,5 +91,5 @@ def tune(rows, cols):
 
 
 if __name__ == "__main__":
-    tune(98304, 256)    # attention shape: short rows
+    tune(98304, 256)    # attention-shaped: lots of short rows
     tune(4096, 4096)    # wide rows

@@ -1,12 +1,9 @@
-"""Demo of tune(), the unified front door (v2 Theme C).
+"""demo of tune(), the one-call entry point, against the simple tiled matmul:
 
-One call does it all: cache lookup -> auto strategy pick -> search -> cache store.
-Three behaviors shown here, on the simple tiled-matmul template:
-
-  1. Cache miss, small space  -> strategy picks GRID (space fits the budget).
-  2. Near-identical shape     -> shape BUCKETING (1000 -> 1024) turns it into a
-                                 cache HIT: no compile, no benchmark, instant.
-  3. Cache miss, budget < space -> strategy picks RANDOM sampling.
+  1. fresh shape, small space -> cache miss, picks grid on its own (3 configs <= budget 8)
+  2. 1000^3 right after tuning 1024^3 -> shape bucketing turns it into a HIT: no
+     compiles, no benchmarks, instant config
+  3. budget 2 against 3 configs -> miss, picks random sampling on its own
 
     cmd /c "winbuild.bat -m tune_demo"     # from the KernelTuner dir
 """

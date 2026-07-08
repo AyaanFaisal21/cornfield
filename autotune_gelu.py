@@ -1,10 +1,7 @@
-"""Autotune GELU -- a pure ELEMENTWISE op (memory-bound, no reduction). Each output
-depends only on its own input, so it's embarrassingly parallel and bandwidth-limited.
-The key knob is therefore VECTORIZATION: load VEC floats per instruction (float4 =
-128-bit transactions) to use memory bandwidth well. BLOCK tunes occupancy.
-
-A third op category for the tuner (compute-bound matmul, reduction softmax, now
-memory-bound elementwise) -- same engine, yet another knob set.
+"""gelu tuner -- elementwise this time: no reduction, every output depends only on its
+own input, pure bandwidth. so the interesting knob is VEC, how many floats each thread
+moves per instruction (4 = 128-bit transactions), plus BLOCK for occupancy. fun
+result: VEC2 won on this card, not VEC4. would not have guessed that.
 
     cmd /c "winbuild.bat -m autotune_gelu"     # from the KernelTuner dir
 """

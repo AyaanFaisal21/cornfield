@@ -1,11 +1,15 @@
-"""v2 / Theme A: register-tiled SGEMM with float4 (128-bit) tile loads.
+"""float4 tile loads for the sgemm -- the change that was supposed to help and didn't.
 
-Only change from autotune_sgemm.py: the two global->shared staging loops load a
-float4 (4 contiguous floats) per instruction instead of one float. Fatter loads
-use the memory bus better and cut load-instruction count 4x. (Assumes M,N,K are
-multiples of the tile dims and BK,BN multiples of 4 -- true for these shapes.)
+only difference from autotune_sgemm.py: the two global->shared staging loops move a
+float4 (4 contiguous floats) per instruction instead of one. fatter loads, 4x fewer
+load instructions. result: best float4 config 0.835ms vs the scalar best 0.829, no
+win, because register tiling already made the kernel compute-bound and faster loads
+attack a non-bottleneck. (assumes dims are multiples of the tile sizes and BK,BN
+multiples of 4, true for these shapes.)
 
-Compare best-float4 vs the scalar best (0.829 ms from random search) and cuBLAS.
+kept in the repo anyway, because this experiment flushed out the silent-launch-failure
+bug: a config that never actually ran read as a 0.016ms "winner" off stale memory from
+a previous kernel. that's why every template now checks cudaGetLastError after launch.
 
     cmd /c "winbuild.bat -m autotune_sgemm_vec"     # from the KernelTuner dir
 """
@@ -82,7 +86,9 @@ torch::Tensor run(torch::Tensor A, torch::Tensor B) {
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("run", &run); }
 """
 
-CONFIGS = [   # 256-thread configs first; the 1024-thread one (register-heavy with float4) last
+# 256-thread configs first; the 1024-thread one last (register-heavy with float4,
+# this is the config that used to fail its launch and fake a win)
+CONFIGS = [
     {"BM": 128, "BN": 128, "BK": 16, "TM": 8, "TN": 8},
     {"BM": 64,  "BN": 64,  "BK": 16, "TM": 4, "TN": 4},   # grid winner (scalar 0.997)
     {"BM": 128, "BN": 64,  "BK": 8,  "TM": 8, "TN": 4},
